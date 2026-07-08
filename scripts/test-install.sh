@@ -8,14 +8,22 @@
 #   4. The check is still present in install.sh (regression guard).
 #   5. The release repository can be overridden with RTK_REPO.
 #   6. The installer warns when another rtk binary shadows the installed path.
+#   7. The documented fork install pipeline passes RTK_REPO to sh, not curl.
+#   8. The fork installer/release path is scoped to macOS Apple Silicon only.
 
 set -eu
 
 REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 INSTALL_SH="$REPO_ROOT/install.sh"
+RELEASE_YML="$REPO_ROOT/.github/workflows/release.yml"
 
 if [ ! -f "$INSTALL_SH" ]; then
     echo "FAIL: install.sh not found at $INSTALL_SH"
+    exit 1
+fi
+
+if [ ! -f "$RELEASE_YML" ]; then
+    echo "FAIL: release.yml not found at $RELEASE_YML"
     exit 1
 fi
 
@@ -90,16 +98,43 @@ else
     fail "install.sh is missing the path-traversal check — was it removed?"
 fi
 
-if grep -qF 'REPO="${RTK_REPO:-rtk-ai/rtk}"' "$INSTALL_SH"; then
-    pass "install.sh lets RTK_REPO override the release repository"
+if grep -qF 'REPO="${RTK_REPO:-Jackzhang144/rtk-codex}"' "$INSTALL_SH"; then
+    pass "install.sh defaults to the fork release repository and lets RTK_REPO override it"
 else
-    fail "install.sh does not let RTK_REPO override the release repository"
+    fail "install.sh does not default to the fork release repository with RTK_REPO override"
 fi
 
 if grep -qF 'Installed binary is shadowed' "$INSTALL_SH"; then
     pass "install.sh warns when PATH resolves to another rtk binary"
 else
     fail "install.sh does not warn when PATH resolves to another rtk binary"
+fi
+
+if grep -qF 'env RTK_REPO=owner/repo RTK_VERSION=tag sh' "$INSTALL_SH" \
+    && ! grep -qF 'RTK_REPO=owner/repo RTK_VERSION=tag curl' "$INSTALL_SH"; then
+    pass "install.sh documents fork install variables on the sh side of the pipe"
+else
+    fail "install.sh documents fork install variables on the wrong side of the pipe"
+fi
+
+if grep -qF 'This release only supports macOS Apple Silicon' "$INSTALL_SH" \
+    && ! grep -qF 'Linux*)' "$INSTALL_SH" \
+    && ! grep -qF 'x86_64|amd64)' "$INSTALL_SH"; then
+    pass "install.sh rejects platforms without fork release assets early"
+else
+    fail "install.sh still advertises unsupported platforms"
+fi
+
+if grep -qF 'target: aarch64-apple-darwin' "$RELEASE_YML" \
+    && ! grep -qF 'target: x86_64-apple-darwin' "$RELEASE_YML" \
+    && ! grep -qF 'target: x86_64-unknown-linux-musl' "$RELEASE_YML" \
+    && ! grep -qF 'target: aarch64-unknown-linux-gnu' "$RELEASE_YML" \
+    && ! grep -qF 'target: x86_64-pc-windows-msvc' "$RELEASE_YML" \
+    && ! grep -qF 'build-deb:' "$RELEASE_YML" \
+    && ! grep -qF 'build-rpm:' "$RELEASE_YML"; then
+    pass "release workflow builds only the macOS Apple Silicon archive"
+else
+    fail "release workflow still builds unsupported package targets"
 fi
 
 echo ""

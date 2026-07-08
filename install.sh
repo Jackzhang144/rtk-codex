@@ -1,11 +1,14 @@
 #!/usr/bin/env sh
-# rtk installer - https://github.com/rtk-ai/rtk
-# Usage: curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
-#        RTK_REPO=owner/repo RTK_VERSION=tag curl -fsSL https://raw.githubusercontent.com/owner/repo/branch/install.sh | sh
+# rtk-codex installer - https://github.com/Jackzhang144/rtk-codex
+# Usage: curl -fsSL https://raw.githubusercontent.com/Jackzhang144/rtk-codex/refs/heads/develop/install.sh | sh
+#        curl -fsSL https://raw.githubusercontent.com/owner/repo/branch/install.sh \
+#          | env RTK_REPO=owner/repo RTK_VERSION=tag sh
+#
+# This fork release installer only supports macOS Apple Silicon prebuilt assets.
 
 set -e
 
-REPO="${RTK_REPO:-rtk-ai/rtk}"
+REPO="${RTK_REPO:-Jackzhang144/rtk-codex}"
 BINARY_NAME="rtk"
 INSTALL_DIR="${RTK_INSTALL_DIR:-$HOME/.local/bin}"
 
@@ -31,18 +34,16 @@ error() {
 # Detect OS
 detect_os() {
     case "$(uname -s)" in
-        Linux*)  OS="linux";;
         Darwin*) OS="darwin";;
-        *)       error "Unsupported operating system: $(uname -s)";;
+        *)       error "This release only supports macOS Apple Silicon (Darwin arm64/aarch64).";;
     esac
 }
 
 # Detect architecture
 detect_arch() {
     case "$(uname -m)" in
-        x86_64|amd64)  ARCH="x86_64";;
         arm64|aarch64) ARCH="aarch64";;
-        *)             error "Unsupported architecture: $(uname -m)";;
+        *)             error "This release only supports macOS Apple Silicon (Darwin arm64/aarch64).";;
     esac
 }
 
@@ -71,17 +72,7 @@ get_latest_version() {
 
 # Build target triple
 get_target() {
-    case "$OS" in
-        linux)
-            case "$ARCH" in
-                x86_64)  TARGET="x86_64-unknown-linux-musl";;
-                aarch64) TARGET="aarch64-unknown-linux-gnu";;
-            esac
-            ;;
-        darwin)
-            TARGET="${ARCH}-apple-darwin"
-            ;;
-    esac
+    TARGET="${ARCH}-apple-darwin"
 }
 
 # Download and install
