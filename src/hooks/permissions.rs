@@ -32,11 +32,13 @@ pub enum Host {
     Claude,
     Cursor,
     Gemini,
+    /// Codex CLI — permission model not yet available; delegates to Claude rules.
+    Codex,
 }
 
 pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
     let (deny_rules, ask_rules, allow_rules) = match host {
-        Host::Claude => load_permission_rules(),
+        Host::Claude | Host::Codex => load_permission_rules(),
         Host::Cursor => load_cursor_rules(),
         Host::Gemini => load_gemini_rules(),
     };

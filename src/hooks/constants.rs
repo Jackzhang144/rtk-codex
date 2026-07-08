@@ -12,6 +12,10 @@ pub const BEFORE_TOOL_KEY: &str = "BeforeTool";
 pub const CLAUDE_HOOK_COMMAND: &str = "rtk hook claude";
 /// Native Rust hook command for Cursor (replaces rtk-rewrite.sh).
 pub const CURSOR_HOOK_COMMAND: &str = "rtk hook cursor";
+/// Native Rust hook command for Codex CLI PreToolUse hook.
+pub const CODEX_HOOK_COMMAND: &str = "rtk hook codex";
+
+pub const CODEX_CONFIG_TOML: &str = "config.toml";
 
 pub const CONFIG_DIR: &str = ".config";
 pub const OPENCODE_SUBDIR: &str = "opencode";

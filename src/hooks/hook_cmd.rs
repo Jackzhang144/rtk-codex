@@ -339,7 +339,7 @@ enum PayloadAction {
     Ignore,
 }
 
-fn process_claude_payload(v: &Value) -> PayloadAction {
+fn process_payload(v: &Value, host: permissions::Host) -> PayloadAction {
     let cmd = match v
         .pointer("/tool_input/command")
         .and_then(|c| c.as_str())
@@ -349,7 +349,7 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
         None => return PayloadAction::Ignore,
     };
 
-    let (rewritten, allow) = match decide_hook_action(cmd, permissions::Host::Claude) {
+    let (rewritten, allow) = match decide_hook_action(cmd, host) {
         HookDecision::Deny => {
             return PayloadAction::Skip {
                 reason: "skip:deny_rule",
@@ -381,10 +381,9 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
     });
 
     if allow {
-        hook_output
-            .as_object_mut()
-            .unwrap()
-            .insert("permissionDecision".into(), json!("allow"));
+        if let Some(obj) = hook_output.as_object_mut() {
+            obj.insert("permissionDecision".into(), json!("allow"));
+        }
     }
 
     PayloadAction::Rewrite {
@@ -394,11 +393,10 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
     }
 }
 
-/// Run the Claude Code PreToolUse hook natively.
-pub fn run_claude() -> Result<()> {
+fn run_host_hook(host: permissions::Host) -> Result<()> {
     let input = read_stdin_limited()?;
 
-    let input = input.trim();
+    let input = strip_leading_bom(&input).trim();
     if input.is_empty() {
         return Ok(());
     }
@@ -411,7 +409,7 @@ pub fn run_claude() -> Result<()> {
         }
     };
 
-    match process_claude_payload(&v) {
+    match process_payload(&v, host) {
         PayloadAction::Rewrite {
             cmd,
             rewritten,
@@ -429,13 +427,30 @@ pub fn run_claude() -> Result<()> {
     Ok(())
 }
 
+/// Run the Claude Code PreToolUse hook natively.
+pub fn run_claude() -> Result<()> {
+    run_host_hook(permissions::Host::Claude)
+}
+
 #[cfg(test)]
 fn run_claude_inner(input: &str) -> Option<String> {
     let v: Value = serde_json::from_str(input).ok()?;
-    match process_claude_payload(&v) {
+    match process_payload(&v, permissions::Host::Claude) {
         PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
         _ => None,
     }
+}
+
+// ── Codex CLI native hook ─────────────────────────────────────
+
+/// Run the Codex CLI PreToolUse hook natively.
+///
+/// Codex hook input (stdin) is a JSON object with `tool_name`, `tool_input.command`,
+/// and turn metadata (`session_id`, `turn_id`, `tool_use_id`, `cwd`, `model`, etc.).
+/// The output format mirrors Claude Code: `{ hookSpecificOutput: { permissionDecision,
+/// updatedInput, ... } }`.
+pub fn run_codex() -> Result<()> {
+    run_host_hook(permissions::Host::Codex)
 }
 
 // ── Cursor native hook ─────────────────────────────────────────
@@ -1253,6 +1268,49 @@ mod tests {
         let long_cmd = format!("git status {}", "A".repeat(100_000));
         let input = claude_input(&long_cmd);
         let _ = run_claude_inner(&input);
+    }
+
+    // ── Codex tests (Host::Codex path through process_payload) ──
+
+    #[cfg(test)]
+    fn run_codex_inner(input: &str) -> Option<String> {
+        let v: Value = serde_json::from_str(input).ok()?;
+        match process_payload(&v, permissions::Host::Codex) {
+            PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn test_codex_rewrite_git_status() {
+        let result = run_codex_inner(&claude_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "rtk git status");
+    }
+
+    #[test]
+    fn test_codex_passthrough_no_output() {
+        assert!(run_codex_inner(&claude_input("htop")).is_none());
+    }
+
+    #[test]
+    fn test_codex_already_rtk_passthrough() {
+        assert!(run_codex_inner(&claude_input("rtk git status")).is_none());
+    }
+
+    #[test]
+    fn test_codex_env_prefix_preserved() {
+        let result = run_codex_inner(&claude_input("GIT_PAGER=cat git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert!(cmd.starts_with("GIT_PAGER=cat rtk git status"));
     }
 
     #[test]

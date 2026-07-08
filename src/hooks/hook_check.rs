@@ -151,10 +151,25 @@ fn warn_marker_path() -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::hooks::constants::{
-        CODEX_DIR, CONFIG_DIR, CURSOR_DIR, GEMINI_DIR, GEMINI_HOOK_FILE, HERMES_DIR,
-        HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME,
-        OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
+        CODEX_CONFIG_TOML, CODEX_DIR, CODEX_HOOK_COMMAND, CONFIG_DIR, CURSOR_DIR, GEMINI_DIR,
+        GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_MANIFEST_FILE,
+        HERMES_PLUGIN_NAME, OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR, PRE_TOOL_USE_KEY,
     };
+
+    /// Check if the RTK Codex hook command is present in a parsed config.toml table.
+    fn codex_hook_in_config(root: &toml::value::Table, hook_command: &str) -> bool {
+        let Some(hooks) = root.get("hooks").and_then(|h| h.as_table()) else {
+            return false;
+        };
+        let Some(ptu) = hooks.get(PRE_TOOL_USE_KEY).and_then(|p| p.as_array()) else {
+            return false;
+        };
+        ptu.iter()
+            .filter_map(|entry| entry.get("hooks")?.as_array())
+            .flatten()
+            .filter_map(|hook| hook.get("command")?.as_str())
+            .any(|cmd| cmd == hook_command)
+    }
 
     fn other_integration_installed(home: &std::path::Path) -> bool {
         let paths = [
@@ -165,7 +180,6 @@ mod tests {
             home.join(CURSOR_DIR)
                 .join(HOOKS_SUBDIR)
                 .join(REWRITE_HOOK_FILE),
-            home.join(CODEX_DIR).join("AGENTS.md"),
             home.join(GEMINI_DIR)
                 .join(HOOKS_SUBDIR)
                 .join(GEMINI_HOOK_FILE),
@@ -174,7 +188,24 @@ mod tests {
                 .join(HERMES_PLUGIN_NAME)
                 .join(HERMES_PLUGIN_MANIFEST_FILE),
         ];
-        paths.iter().any(|p| p.exists())
+        if paths.iter().any(|p| p.exists()) {
+            return true;
+        }
+        // Codex: parse config.toml and check for RTK hook command
+        // (file-existence alone is insufficient — config.toml may exist
+        // without an RTK PreToolUse hook entry; string matching would
+        // false-positive on comments containing "rtk hook codex")
+        let codex_config = home.join(CODEX_DIR).join(CODEX_CONFIG_TOML);
+        if let Ok(content) = std::fs::read_to_string(&codex_config) {
+            if let Ok(val) = content.parse::<toml::Value>() {
+                if let Some(root) = val.as_table() {
+                    if codex_hook_in_config(root, CODEX_HOOK_COMMAND) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     #[test]
@@ -247,9 +278,9 @@ mod tests {
     #[test]
     fn test_other_integration_codex() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join(CODEX_DIR).join("AGENTS.md");
+        let path = tmp.path().join(CODEX_DIR).join(CODEX_CONFIG_TOML);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"agents").unwrap();
+        std::fs::write(&path, format!("[hooks]\nPreToolUse = [\n  {{ matcher = \"Bash\", hooks = [\n    {{ type = \"command\", command = \"{}\" }}\n  ]}}\n]\n", CODEX_HOOK_COMMAND)).unwrap();
         assert!(other_integration_installed(tmp.path()));
     }
 
