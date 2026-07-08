@@ -1,10 +1,11 @@
 #!/usr/bin/env sh
 # rtk installer - https://github.com/rtk-ai/rtk
 # Usage: curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
+#        RTK_REPO=owner/repo RTK_VERSION=tag curl -fsSL https://raw.githubusercontent.com/owner/repo/branch/install.sh | sh
 
 set -e
 
-REPO="rtk-ai/rtk"
+REPO="${RTK_REPO:-rtk-ai/rtk}"
 BINARY_NAME="rtk"
 INSTALL_DIR="${RTK_INSTALL_DIR:-$HOME/.local/bin}"
 
@@ -64,7 +65,7 @@ get_latest_version() {
     fi
 
     if [ -z "$VERSION" ]; then
-        error "Failed to get latest version (GitHub API may be rate-limited; set RTK_VERSION=vX.Y.Z to pin)"
+        error "Failed to get latest version for ${REPO} (GitHub API may be rate-limited; set RTK_VERSION=vX.Y.Z to pin)"
     fi
 }
 
@@ -157,9 +158,15 @@ verify() {
     else
         error "Binary not found at expected location: $INSTALLED_BIN"
     fi
-    if ! command -v "$BINARY_NAME" >/dev/null 2>&1; then
+    PATH_BIN=$(command -v "$BINARY_NAME" 2>/dev/null || true)
+    if [ -z "$PATH_BIN" ]; then
         warn "Binary installed but not in PATH. Add to your shell profile:"
         warn "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+    elif [ "$PATH_BIN" != "$INSTALLED_BIN" ]; then
+        warn "Installed binary is shadowed by another rtk on PATH:"
+        warn "  installed: ${INSTALLED_BIN}"
+        warn "  active:    ${PATH_BIN}"
+        warn "Move ${INSTALL_DIR} earlier in PATH or remove the older installation."
     fi
 }
 

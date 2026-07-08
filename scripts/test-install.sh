@@ -6,6 +6,8 @@
 #   2. Archives with absolute paths are rejected pre-extraction.
 #   3. Archives with ".." components are rejected pre-extraction.
 #   4. The check is still present in install.sh (regression guard).
+#   5. The release repository can be overridden with RTK_REPO.
+#   6. The installer warns when another rtk binary shadows the installed path.
 
 set -eu
 
@@ -86,6 +88,18 @@ if grep -qF 'tar -tzf' "$INSTALL_SH" && grep -qF '\.\.' "$INSTALL_SH"; then
     pass "install.sh still contains the path-traversal check"
 else
     fail "install.sh is missing the path-traversal check — was it removed?"
+fi
+
+if grep -qF 'REPO="${RTK_REPO:-rtk-ai/rtk}"' "$INSTALL_SH"; then
+    pass "install.sh lets RTK_REPO override the release repository"
+else
+    fail "install.sh does not let RTK_REPO override the release repository"
+fi
+
+if grep -qF 'Installed binary is shadowed' "$INSTALL_SH"; then
+    pass "install.sh warns when PATH resolves to another rtk binary"
+else
+    fail "install.sh does not warn when PATH resolves to another rtk binary"
 fi
 
 echo ""
