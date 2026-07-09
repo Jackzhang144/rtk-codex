@@ -349,7 +349,16 @@ fn process_payload(v: &Value, host: permissions::Host) -> PayloadAction {
         None => return PayloadAction::Ignore,
     };
 
-    let (rewritten, allow) = match decide_hook_action(cmd, host) {
+    process_payload_decision(v, host, cmd, decide_hook_action(cmd, host))
+}
+
+fn process_payload_decision(
+    v: &Value,
+    host: permissions::Host,
+    cmd: &str,
+    decision: HookDecision,
+) -> PayloadAction {
+    let (rewritten, allow) = match decision {
         HookDecision::Deny => {
             return PayloadAction::Skip {
                 reason: "skip:deny_rule",
@@ -363,6 +372,12 @@ fn process_payload(v: &Value, host: permissions::Host) -> PayloadAction {
             }
         }
         HookDecision::AllowRewrite(r) => (r, true),
+        HookDecision::AskRewrite(_) if host == permissions::Host::Codex => {
+            return PayloadAction::Skip {
+                reason: "skip:codex_requires_allow",
+                cmd: cmd.to_string(),
+            }
+        }
         HookDecision::AskRewrite(r) => (r, false),
     };
 
@@ -1029,13 +1044,23 @@ mod tests {
 
     #[test]
     fn test_claude_json_output_structure() {
-        let result = run_claude_inner(&claude_input("git status")).unwrap();
+        let input = claude_input("git status");
+        let payload: Value = serde_json::from_str(&input).unwrap();
+        let result = match process_payload_decision(
+            &payload,
+            permissions::Host::Claude,
+            "git status",
+            HookDecision::AskRewrite("rtk git status".into()),
+        ) {
+            PayloadAction::Rewrite { output, .. } => output.to_string(),
+            _ => panic!("expected Claude ask rewrite output"),
+        };
         let v: Value = serde_json::from_str(&result).unwrap();
         let hook = &v["hookSpecificOutput"];
 
         assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY);
-        // permissionDecision is only set when an explicit allow rule matches;
-        // with default-to-ask semantics (no rules configured), it is absent.
+        // Claude ask rewrites must not auto-allow; the host should still prompt.
+        assert!(hook.get("permissionDecision").is_none());
         assert_eq!(hook["permissionDecisionReason"], "RTK auto-rewrite");
         assert!(hook["updatedInput"].is_object());
         assert!(hook["updatedInput"]["command"].is_string());
@@ -1281,15 +1306,39 @@ mod tests {
         }
     }
 
+    #[cfg(test)]
+    fn run_codex_inner_with_decision(input: &str, decision: HookDecision) -> Option<String> {
+        let v: Value = serde_json::from_str(input).ok()?;
+        let cmd = v.pointer("/tool_input/command").and_then(|c| c.as_str())?;
+        match process_payload_decision(&v, permissions::Host::Codex, cmd, decision) {
+            PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
+            _ => None,
+        }
+    }
+
     #[test]
-    fn test_codex_rewrite_git_status() {
-        let result = run_codex_inner(&claude_input("git status")).unwrap();
+    fn test_codex_allow_rewrite_git_status() {
+        let result = run_codex_inner_with_decision(
+            &claude_input("git status"),
+            HookDecision::AllowRewrite("rtk git status".into()),
+        )
+        .unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();
         let cmd = v
             .pointer("/hookSpecificOutput/updatedInput/command")
             .and_then(|c| c.as_str())
             .unwrap();
         assert_eq!(cmd, "rtk git status");
+        assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "allow");
+    }
+
+    #[test]
+    fn test_codex_default_rewrite_defers_to_native_prompt() {
+        assert!(run_codex_inner_with_decision(
+            &claude_input("git status"),
+            HookDecision::AskRewrite("rtk git status".into()),
+        )
+        .is_none());
     }
 
     #[test]
@@ -1304,7 +1353,11 @@ mod tests {
 
     #[test]
     fn test_codex_env_prefix_preserved() {
-        let result = run_codex_inner(&claude_input("GIT_PAGER=cat git status")).unwrap();
+        let result = run_codex_inner_with_decision(
+            &claude_input("GIT_PAGER=cat git status"),
+            HookDecision::AllowRewrite("GIT_PAGER=cat rtk git status".into()),
+        )
+        .unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();
         let cmd = v
             .pointer("/hookSpecificOutput/updatedInput/command")

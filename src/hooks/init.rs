@@ -2354,7 +2354,7 @@ fn codex_hook_already_present(root: &toml::value::Table, hook_command: &str) -> 
 
 /// Deep-merge an RTK PreToolUse hook entry into a parsed config.toml `Table`.
 /// Creates `hooks.PreToolUse` structure if missing; merges into an existing
-/// `Bash|apply_patch` matcher entry when one already exists.
+/// `Bash` matcher entry when one already exists.
 fn insert_codex_hook_entry(root: &mut toml::value::Table, hook_command: &str) -> Result<()> {
     let hooks = root
         .entry("hooks")
@@ -2384,13 +2384,13 @@ fn insert_codex_hook_entry(root: &mut toml::value::Table, hook_command: &str) ->
         toml::Value::String(hook_command.to_string()),
     );
 
-    // Merge into existing Bash|apply_patch matcher when one already
-    // exists, rather than creating a duplicate entry.
+    // Merge into an existing Bash matcher when one already exists, rather than
+    // creating a duplicate entry.
     let existing = ptu_array.iter_mut().find(|entry| {
         entry
             .get("matcher")
             .and_then(|m| m.as_str())
-            .is_some_and(|m| m == "Bash|apply_patch")
+            .is_some_and(|m| m == "Bash")
     });
     if let Some(existing_entry) = existing {
         if let Some(hooks_arr) = existing_entry
@@ -2406,7 +2406,7 @@ fn insert_codex_hook_entry(root: &mut toml::value::Table, hook_command: &str) ->
     let mut matcher_entry = toml::value::Table::new();
     matcher_entry.insert(
         "matcher".to_string(),
-        toml::Value::String("Bash|apply_patch".to_string()),
+        toml::Value::String("Bash".to_string()),
     );
     matcher_entry.insert(
         "hooks".to_string(),
@@ -2462,7 +2462,6 @@ fn write_codex_hook_config(codex_dir: &Path, hook_command: &str, ctx: InitContex
         return Ok(true);
     }
 
-    // Only mutate and serialize when actually writing.
     insert_codex_hook_entry(&mut root, hook_command)?;
     let output = toml::to_string(&root).context("Failed to serialize config.toml")?;
 
@@ -5319,8 +5318,12 @@ mod tests {
             "config.toml should contain PreToolUse section"
         );
         assert!(
-            content.contains("Bash|apply_patch"),
-            "config.toml should contain Bash|apply_patch matcher"
+            content.contains("matcher = \"Bash\""),
+            "config.toml should contain Bash matcher"
+        );
+        assert!(
+            !content.contains("Bash|apply_patch"),
+            "config.toml should not install the hook for apply_patch"
         );
 
         let rtk_md = codex_dir.join(RTK_MD);
