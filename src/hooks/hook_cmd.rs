@@ -128,6 +128,7 @@ fn get_rewritten(cmd: &str) -> Option<String> {
 enum HookDecision {
     AllowRewrite(String),
     AskRewrite(String),
+    DefaultRewrite(String),
     Defer,
     Deny,
 }
@@ -139,15 +140,35 @@ fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
     if crate::discover::lexer::contains_unattestable_construct(cmd) {
         return HookDecision::Defer;
     }
-    match get_rewritten(cmd) {
-        Some(r) if verdict == PermissionVerdict::Allow => HookDecision::AllowRewrite(r),
-        Some(r) => HookDecision::AskRewrite(r),
-        None => HookDecision::Defer,
+
+    let Some(rewritten) = get_rewritten(cmd) else {
+        return HookDecision::Defer;
+    };
+
+    match verdict {
+        PermissionVerdict::Allow => HookDecision::AllowRewrite(rewritten),
+        PermissionVerdict::Ask => HookDecision::AskRewrite(rewritten),
+        PermissionVerdict::Default => HookDecision::DefaultRewrite(rewritten),
+        PermissionVerdict::Deny => HookDecision::Deny,
     }
 }
 
 fn decide_hook_action(cmd: &str, host: permissions::Host) -> HookDecision {
-    decide_from_verdict(cmd, permissions::check_command_for(cmd, host))
+    decide_hook_action_from_verdict(cmd, host, permissions::check_command_for(cmd, host))
+}
+
+fn decide_hook_action_from_verdict(
+    cmd: &str,
+    host: permissions::Host,
+    verdict: PermissionVerdict,
+) -> HookDecision {
+    match decide_from_verdict(cmd, verdict) {
+        HookDecision::DefaultRewrite(r) if host == permissions::Host::Codex => {
+            HookDecision::AllowRewrite(r)
+        }
+        HookDecision::DefaultRewrite(r) => HookDecision::AskRewrite(r),
+        decision => decision,
+    }
 }
 
 fn handle_vscode(cmd: &str) -> Result<()> {
@@ -158,7 +179,7 @@ fn handle_vscode(cmd: &str) -> Result<()> {
         }
         HookDecision::Defer => return Ok(()),
         HookDecision::AllowRewrite(r) => ("allow", r),
-        HookDecision::AskRewrite(r) => ("ask", r),
+        HookDecision::AskRewrite(r) | HookDecision::DefaultRewrite(r) => ("ask", r),
     };
 
     audit_log("rewrite", cmd, &rewritten);
@@ -202,7 +223,7 @@ fn copilot_cli_response_from_decision(
         }
         HookDecision::Defer => return None,
         HookDecision::AllowRewrite(r) => (r, true),
-        HookDecision::AskRewrite(r) => (r, false),
+        HookDecision::AskRewrite(r) | HookDecision::DefaultRewrite(r) => (r, false),
     };
 
     audit_log("rewrite", cmd, &rewritten);
@@ -259,6 +280,10 @@ pub fn run_gemini() -> Result<()> {
             print_gemini("allow", Some(rewritten));
         }
         HookDecision::AskRewrite(ref rewritten) => {
+            audit_log("ask", cmd, rewritten);
+            print_gemini("ask_user", Some(rewritten));
+        }
+        HookDecision::DefaultRewrite(ref rewritten) => {
             audit_log("ask", cmd, rewritten);
             print_gemini("ask_user", Some(rewritten));
         }
@@ -378,7 +403,9 @@ fn process_payload_decision(
                 cmd: cmd.to_string(),
             }
         }
+        HookDecision::DefaultRewrite(r) if host == permissions::Host::Codex => (r, true),
         HookDecision::AskRewrite(r) => (r, false),
+        HookDecision::DefaultRewrite(r) => (r, false),
     };
 
     let updated_input = {
@@ -521,6 +548,10 @@ pub fn run_cursor() -> Result<()> {
             audit_log("ask", &cmd, &rewritten);
             cursor_ask(&rewritten)
         }
+        HookDecision::DefaultRewrite(rewritten) => {
+            audit_log("ask", &cmd, &rewritten);
+            cursor_ask(&rewritten)
+        }
         other => {
             if matches!(other, HookDecision::Deny) {
                 audit_log("deny", &cmd, "");
@@ -580,7 +611,9 @@ fn run_cursor_inner_with_rules(
     let verdict = permissions::check_command_with_rules(&cmd, deny_rules, ask_rules, allow_rules);
     match decide_from_verdict(&cmd, verdict) {
         HookDecision::AllowRewrite(rewritten) => cursor_allow(&rewritten),
-        HookDecision::AskRewrite(rewritten) => cursor_ask(&rewritten),
+        HookDecision::AskRewrite(rewritten) | HookDecision::DefaultRewrite(rewritten) => {
+            cursor_ask(&rewritten)
+        }
         _ => "{}".to_string(),
     }
 }
@@ -1307,22 +1340,30 @@ mod tests {
     }
 
     #[cfg(test)]
-    fn run_codex_inner_with_decision(input: &str, decision: HookDecision) -> Option<String> {
+    fn run_host_inner_with_verdict(
+        input: &str,
+        host: permissions::Host,
+        verdict: PermissionVerdict,
+    ) -> Option<String> {
         let v: Value = serde_json::from_str(input).ok()?;
         let cmd = v.pointer("/tool_input/command").and_then(|c| c.as_str())?;
-        match process_payload_decision(&v, permissions::Host::Codex, cmd, decision) {
+        let decision = decide_hook_action_from_verdict(cmd, host, verdict);
+        match process_payload_decision(&v, host, cmd, decision) {
             PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
             _ => None,
         }
     }
 
+    #[cfg(test)]
+    fn run_codex_inner_with_verdict(input: &str, verdict: PermissionVerdict) -> Option<String> {
+        run_host_inner_with_verdict(input, permissions::Host::Codex, verdict)
+    }
+
     #[test]
     fn test_codex_allow_rewrite_git_status() {
-        let result = run_codex_inner_with_decision(
-            &claude_input("git status"),
-            HookDecision::AllowRewrite("rtk git status".into()),
-        )
-        .unwrap();
+        let result =
+            run_codex_inner_with_verdict(&claude_input("git status"), PermissionVerdict::Allow)
+                .unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();
         let cmd = v
             .pointer("/hookSpecificOutput/updatedInput/command")
@@ -1333,12 +1374,28 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_default_rewrite_defers_to_native_prompt() {
-        assert!(run_codex_inner_with_decision(
-            &claude_input("git status"),
-            HookDecision::AskRewrite("rtk git status".into()),
-        )
-        .is_none());
+    fn test_codex_default_rewrite_auto_allows() {
+        let result =
+            run_codex_inner_with_verdict(&claude_input("git status"), PermissionVerdict::Default)
+                .unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            v.pointer("/hookSpecificOutput/updatedInput/command"),
+            Some(&json!("rtk git status"))
+        );
+        assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "allow");
+    }
+
+    #[test]
+    fn test_codex_explicit_ask_does_not_auto_allow() {
+        assert!(run_codex_inner_with_verdict(&claude_input("git status"), PermissionVerdict::Ask)
+            .is_none());
+    }
+
+    #[test]
+    fn test_codex_explicit_deny_emits_no_hook_json() {
+        assert!(run_codex_inner_with_verdict(&claude_input("git status"), PermissionVerdict::Deny)
+            .is_none());
     }
 
     #[test]
@@ -1353,9 +1410,9 @@ mod tests {
 
     #[test]
     fn test_codex_env_prefix_preserved() {
-        let result = run_codex_inner_with_decision(
+        let result = run_codex_inner_with_verdict(
             &claude_input("GIT_PAGER=cat git status"),
-            HookDecision::AllowRewrite("GIT_PAGER=cat rtk git status".into()),
+            PermissionVerdict::Default,
         )
         .unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();
@@ -1364,6 +1421,34 @@ mod tests {
             .and_then(|c| c.as_str())
             .unwrap();
         assert!(cmd.starts_with("GIT_PAGER=cat rtk git status"));
+    }
+
+    #[test]
+    fn test_codex_default_unattestable_construct_emits_no_hook_json() {
+        assert!(run_codex_inner_with_verdict(
+            &claude_input("git status $(rm -rf /tmp/x)"),
+            PermissionVerdict::Default,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn test_claude_default_rewrite_keeps_ask_semantics() {
+        let result = run_host_inner_with_verdict(
+            &claude_input("git status"),
+            permissions::Host::Claude,
+            PermissionVerdict::Default,
+        )
+        .unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            v.pointer("/hookSpecificOutput/updatedInput/command"),
+            Some(&json!("rtk git status"))
+        );
+        assert!(
+            v["hookSpecificOutput"].get("permissionDecision").is_none(),
+            "Claude default rewrites must keep ask semantics and not auto-allow"
+        );
     }
 
     #[test]
@@ -1416,9 +1501,17 @@ mod tests {
     }
 
     #[test]
-    fn test_decide_ask_for_default_verdict() {
+    fn test_decide_default_verdict_remains_distinct() {
         assert!(matches!(
             decide_with_rules("git status", &[], &[], &[]),
+            HookDecision::DefaultRewrite(_)
+        ));
+    }
+
+    #[test]
+    fn test_decide_ask_for_explicit_ask_verdict() {
+        assert!(matches!(
+            decide_with_rules("git status", &[], &["git *".to_string()], &[]),
             HookDecision::AskRewrite(_)
         ));
     }
@@ -1477,7 +1570,9 @@ mod tests {
                 r#"{"decision":"deny","reason":"Blocked by RTK permission rule"}"#.to_string()
             }
             HookDecision::AllowRewrite(r) => gemini_json("allow", Some(&r)),
-            HookDecision::AskRewrite(r) => gemini_json("ask_user", Some(&r)),
+            HookDecision::AskRewrite(r) | HookDecision::DefaultRewrite(r) => {
+                gemini_json("ask_user", Some(&r))
+            }
             HookDecision::Defer => gemini_json("ask_user", None),
         }
     }
