@@ -1,11 +1,12 @@
 //! Detects whether RTK hooks are installed and warns if they are outdated.
 
 use super::constants::{
-    CLAUDE_HOOK_COMMAND, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    CLAUDE_HOOK_COMMAND, CODEX_CONFIG_TOML, CODEX_HOOK_COMMAND, HOOKS_SUBDIR, PRE_TOOL_USE_KEY,
+    REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
-use super::init::resolve_claude_dir;
+use super::init::{resolve_claude_dir, resolve_codex_dir};
 use crate::core::constants::RTK_DATA_DIR;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const CURRENT_HOOK_VERSION: u8 = 3;
 const WARN_INTERVAL_SECS: u64 = 24 * 3600;
@@ -25,37 +26,82 @@ pub enum HookStatus {
 /// Returns `Ok` if no Claude Code is detected (not applicable).
 pub fn status() -> HookStatus {
     // Don't warn users who don't have Claude Code installed
-    let claude_dir = match resolve_claude_dir() {
-        Ok(d) => d,
-        Err(_) => return HookStatus::Ok,
+    let claude_dir = resolve_claude_dir().ok();
+    let codex_dir = resolve_codex_dir().ok();
+    status_at(claude_dir.as_deref(), codex_dir.as_deref())
+}
+
+fn status_at(claude_dir: Option<&Path>, codex_dir: Option<&Path>) -> HookStatus {
+    let Some(claude_dir) = claude_dir else {
+        return HookStatus::Ok;
     };
     if !claude_dir.exists() {
         return HookStatus::Ok;
     }
 
-    // Check for new binary command in settings.json first
-    if binary_hook_registered(&claude_dir) {
+    let claude_status = if binary_hook_registered(claude_dir) {
         // If old script file still exists alongside new command, report Outdated
         // (migration not complete — user should run `rtk init -g` to clean up)
         let old_hook = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
         if old_hook.exists() {
-            return HookStatus::Outdated;
+            HookStatus::Outdated
+        } else {
+            HookStatus::Ok
         }
-        return HookStatus::Ok;
-    }
+    } else {
+        // Fall back to legacy script file check
+        let Some(hook_path) = hook_installed_path() else {
+            return suppress_if_codex_hook_present(HookStatus::Missing, codex_dir);
+        };
+        let Ok(content) = std::fs::read_to_string(&hook_path) else {
+            return suppress_if_codex_hook_present(HookStatus::Outdated, codex_dir);
+        };
+        if parse_hook_version(&content) >= CURRENT_HOOK_VERSION {
+            HookStatus::Ok
+        } else {
+            HookStatus::Outdated
+        }
+    };
 
-    // Fall back to legacy script file check
-    let Some(hook_path) = hook_installed_path() else {
-        return HookStatus::Missing;
-    };
-    let Ok(content) = std::fs::read_to_string(&hook_path) else {
-        return HookStatus::Outdated; // exists but unreadable — treat as needs-update
-    };
-    if parse_hook_version(&content) >= CURRENT_HOOK_VERSION {
+    suppress_if_codex_hook_present(claude_status, codex_dir)
+}
+
+fn suppress_if_codex_hook_present(status: HookStatus, codex_dir: Option<&Path>) -> HookStatus {
+    if status != HookStatus::Ok && codex_dir.is_some_and(codex_hook_registered_at) {
         HookStatus::Ok
     } else {
-        HookStatus::Outdated
+        status
     }
+}
+
+/// Check for the exact Codex PreToolUse command written by `rtk init --codex`.
+fn codex_hook_registered_at(codex_dir: &Path) -> bool {
+    let config_path = codex_dir.join(CODEX_CONFIG_TOML);
+    let Ok(content) = std::fs::read_to_string(config_path) else {
+        return false;
+    };
+    let Ok(value) = content.parse::<toml::Value>() else {
+        return false;
+    };
+    let Some(root) = value.as_table() else {
+        return false;
+    };
+    let Some(hooks) = root.get("hooks").and_then(|hooks| hooks.as_table()) else {
+        return false;
+    };
+    let Some(pre_tool_use) = hooks
+        .get(PRE_TOOL_USE_KEY)
+        .and_then(|pre_tool_use| pre_tool_use.as_array())
+    else {
+        return false;
+    };
+
+    pre_tool_use
+        .iter()
+        .filter_map(|entry| entry.get("hooks")?.as_array())
+        .flatten()
+        .filter_map(|hook| hook.get("command")?.as_str())
+        .any(|command| command == CODEX_HOOK_COMMAND)
 }
 
 /// Check if the native binary command is registered in settings.json
@@ -325,6 +371,29 @@ mod tests {
         )
         .unwrap();
         assert!(!other_integration_installed(tmp.path()));
+    }
+
+    #[test]
+    fn test_status_ignores_missing_claude_hook_when_codex_is_installed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let claude_dir = tmp.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+
+        let codex_config = tmp.path().join(CODEX_DIR).join(CODEX_CONFIG_TOML);
+        std::fs::create_dir_all(codex_config.parent().unwrap()).unwrap();
+        std::fs::write(
+            &codex_config,
+            format!(
+                "[hooks]\nPreToolUse = [\n  {{ matcher = \"Bash\", hooks = [\n    {{ type = \"command\", command = \"{}\" }}\n  ]}}\n]\n",
+                CODEX_HOOK_COMMAND
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            status_at(Some(&claude_dir), codex_config.parent()),
+            HookStatus::Ok
+        );
     }
 
     #[test]

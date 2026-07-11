@@ -3060,7 +3060,7 @@ fn resolve_claude_dir_from(
         .context("Cannot determine Claude config directory. Set $CLAUDE_CONFIG_DIR or $HOME.")
 }
 
-fn resolve_codex_dir() -> Result<PathBuf> {
+pub(super) fn resolve_codex_dir() -> Result<PathBuf> {
     resolve_codex_dir_from(
         std::env::var_os("CODEX_HOME").map(PathBuf::from),
         dirs::home_dir(),
