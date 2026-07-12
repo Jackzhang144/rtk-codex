@@ -35,17 +35,18 @@ pub enum Host {
     Claude,
     Cursor,
     Gemini,
-    /// Codex CLI delegates to Claude rules.
+    /// Codex does not expose permission rules that hooks can safely reuse.
     Codex,
     Droid,
 }
 
 pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
     let (deny_rules, ask_rules, allow_rules) = match host {
-        Host::Claude | Host::Codex => load_permission_rules(),
+        Host::Claude => load_permission_rules(),
         Host::Cursor => load_cursor_rules(),
         Host::Gemini => load_gemini_rules(),
         Host::Droid => load_droid_rules(),
+        Host::Codex => return PermissionVerdict::Default,
     };
     check_command_with_rules(cmd, &deny_rules, &ask_rules, &allow_rules)
 }
@@ -528,6 +529,14 @@ mod tests {
         // No rules at all → Default (ask), not Allow.
         assert_eq!(
             check_command_with_rules("git push --force", &[], &[], &[]),
+            PermissionVerdict::Default
+        );
+    }
+
+    #[test]
+    fn test_codex_does_not_reuse_claude_permission_rules() {
+        assert_eq!(
+            check_command_for("git push --force", Host::Codex),
             PermissionVerdict::Default
         );
     }

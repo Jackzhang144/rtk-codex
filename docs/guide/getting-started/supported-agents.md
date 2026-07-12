@@ -40,7 +40,7 @@ Agent runs "cargo test"
 | Factory Droid | Shell hook (`PreToolUse`, matcher `Execute`) | Yes |
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
 | Windsurf | Rules file (prompt-level) | N/A |
-| Codex CLI | AGENTS.md instructions | N/A |
+| Codex CLI | RTK.md + native `PreToolUse` guardrail | No rewrite by default |
 | Kilo Code | Rules file (prompt-level) | N/A |
 | Google Antigravity | Rules file (prompt-level) | N/A |
 | Mistral Vibe | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Pending upstream |
@@ -175,9 +175,11 @@ rtk init --global --agent windsurf    # creates .windsurfrules in current projec
 ### Codex CLI
 
 ```bash
-rtk init --codex           # project-scoped (AGENTS.md)
-rtk init --global --codex  # user-global (~/.codex/AGENTS.md)
+rtk init --codex           # project-scoped (.codex/config.toml + RTK.md)
+rtk init --global --codex  # user-global ($CODEX_HOME or ~/.codex)
 ```
+
+After installation, run `/hooks` in Codex to review and trust the hook. RTK does not return `allow + updatedInput` by default, so Codex keeps its native approval behavior.
 
 ### Kilo Code
 

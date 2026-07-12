@@ -862,13 +862,11 @@ fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
     let InitContext {
         dry_run, verbose, ..
     } = ctx;
-    if !global {
-        anyhow::bail!(
-            "Uninstall only works with --global flag. For local projects, manually remove RTK from .codex/config.toml"
-        );
-    }
-
-    let codex_dir = resolve_codex_dir()?;
+    let codex_dir = if global {
+        resolve_codex_dir()?
+    } else {
+        PathBuf::from(CODEX_DIR)
+    };
     let mut removed = Vec::new();
 
     // Remove hook config from config.toml
@@ -902,36 +900,35 @@ fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
     // config while leaving stale AGENTS.md references behind.
     let agents_md = codex_dir.join(AGENTS_MD);
     if agents_md.exists() {
-        if let Ok(content) = fs::read_to_string(&agents_md) {
-            let mut changed = false;
-            let mut cleaned = content;
-            if cleaned.contains(RTK_BLOCK_START) {
-                cleaned = remove_rtk_block(&cleaned).0;
-                changed = true;
-            }
-            let absolute_ref = codex_rtk_md_ref(&codex_dir);
-            if has_rtk_reference(&cleaned, &[RTK_MD_REF, &absolute_ref]) {
-                cleaned = clean_double_blanks(
-                    &cleaned
-                        .lines()
-                        .filter(|l| !has_rtk_reference(l, &[RTK_MD_REF, &absolute_ref]))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                );
-                changed = true;
-            }
-            // Collapse blank lines that may have been left by block removal.
-            if changed {
-                cleaned = clean_double_blanks(&cleaned);
-            }
-            if changed && !dry_run {
-                atomic_write(&agents_md, &cleaned).with_context(|| {
-                    format!("Failed to write AGENTS.md: {}", agents_md.display())
-                })?;
-                removed.push("AGENTS.md: removed legacy @RTK.md reference".to_string());
-                if verbose > 0 {
-                    eprintln!("Cleaned legacy AGENTS.md: {}", agents_md.display());
-                }
+        let content = fs::read_to_string(&agents_md)
+            .with_context(|| format!("Failed to read AGENTS.md: {}", agents_md.display()))?;
+        let mut changed = false;
+        let mut cleaned = content;
+        if cleaned.contains(RTK_BLOCK_START) {
+            cleaned = remove_rtk_block(&cleaned).0;
+            changed = true;
+        }
+        let absolute_ref = codex_rtk_md_ref(&codex_dir);
+        if has_rtk_reference(&cleaned, &[RTK_MD_REF, &absolute_ref]) {
+            cleaned = clean_double_blanks(
+                &cleaned
+                    .lines()
+                    .filter(|l| !has_rtk_reference(l, &[RTK_MD_REF, &absolute_ref]))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+            changed = true;
+        }
+        // Collapse blank lines that may have been left by block removal.
+        if changed {
+            cleaned = clean_double_blanks(&cleaned);
+        }
+        if changed && !dry_run {
+            atomic_write(&agents_md, &cleaned)
+                .with_context(|| format!("Failed to write AGENTS.md: {}", agents_md.display()))?;
+            removed.push("AGENTS.md: removed legacy @RTK.md reference".to_string());
+            if verbose > 0 {
+                eprintln!("Cleaned legacy AGENTS.md: {}", agents_md.display());
             }
         }
     }
@@ -2355,68 +2352,88 @@ fn codex_hook_already_present(root: &toml::value::Table, hook_command: &str) -> 
         .any(|cmd| cmd == hook_command)
 }
 
-/// Deep-merge an RTK PreToolUse hook entry into a parsed config.toml `Table`.
-/// Creates `hooks.PreToolUse` structure if missing; merges into an existing
-/// `Bash` matcher entry when one already exists.
-fn insert_codex_hook_entry(root: &mut toml::value::Table, hook_command: &str) -> Result<()> {
-    let hooks = root
+fn insert_codex_hook_entry_preserving_format(
+    document: &mut toml_edit::DocumentMut,
+    hook_command: &str,
+) -> Result<()> {
+    use toml_edit::{Array, ArrayOfTables, InlineTable, Item, Table, Value};
+
+    let hooks = document
+        .as_table_mut()
         .entry("hooks")
-        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
-    let hooks_table = match hooks.as_table_mut() {
-        Some(t) => t,
-        None => anyhow::bail!("hooks key exists but is not a table — cannot write PreToolUse hook"),
-    };
-
-    let ptu = hooks_table
+        .or_insert_with(|| Item::Table(Table::new()))
+        .as_table_mut()
+        .context("hooks key exists but is not a table — cannot write PreToolUse hook")?;
+    let pre_tool_use = hooks
         .entry(PRE_TOOL_USE_KEY)
-        .or_insert_with(|| toml::Value::Array(Vec::new()));
-    let ptu_array = match ptu.as_array_mut() {
-        Some(a) => a,
-        None => {
-            anyhow::bail!("PreToolUse key exists but is not an array — cannot write hook")
-        }
-    };
+        .or_insert_with(|| Item::ArrayOfTables(ArrayOfTables::new()));
 
-    let mut hook_entry = toml::value::Table::new();
-    hook_entry.insert(
-        "type".to_string(),
-        toml::Value::String("command".to_string()),
-    );
-    hook_entry.insert(
-        "command".to_string(),
-        toml::Value::String(hook_command.to_string()),
-    );
+    if let Some(pre_tool_use) = pre_tool_use.as_array_mut() {
+        let mut hook = InlineTable::new();
+        hook.insert("type", Value::from("command"));
+        hook.insert("command", Value::from(hook_command));
 
-    // Merge into an existing Bash matcher when one already exists, rather than
-    // creating a duplicate entry.
-    let existing = ptu_array.iter_mut().find(|entry| {
-        entry
-            .get("matcher")
-            .and_then(|m| m.as_str())
-            .is_some_and(|m| m == "Bash")
-    });
-    if let Some(existing_entry) = existing {
-        if let Some(hooks_arr) = existing_entry
-            .as_table_mut()
-            .and_then(|t| t.get_mut("hooks"))
-            .and_then(|h| h.as_array_mut())
-        {
-            hooks_arr.push(toml::Value::Table(hook_entry));
+        if let Some(matcher) = pre_tool_use.iter_mut().find_map(|entry| {
+            let matcher = entry.as_inline_table_mut()?;
+            (matcher.get("matcher").and_then(Value::as_str) == Some("Bash")).then_some(matcher)
+        }) {
+            matcher
+                .entry("hooks")
+                .or_insert_with(|| Value::Array(Array::new()))
+                .as_array_mut()
+                .context("Bash matcher hooks key is not an array")?
+                .push(Value::InlineTable(hook));
             return Ok(());
         }
+
+        let mut matcher = InlineTable::new();
+        matcher.insert("matcher", Value::from("Bash"));
+        let mut matcher_hooks = Array::new();
+        matcher_hooks.push(Value::InlineTable(hook));
+        matcher.insert("hooks", Value::Array(matcher_hooks));
+        pre_tool_use.push(Value::InlineTable(matcher));
+        return Ok(());
     }
 
-    let mut matcher_entry = toml::value::Table::new();
-    matcher_entry.insert(
-        "matcher".to_string(),
-        toml::Value::String("Bash".to_string()),
-    );
-    matcher_entry.insert(
-        "hooks".to_string(),
-        toml::Value::Array(vec![toml::Value::Table(hook_entry)]),
-    );
+    let pre_tool_use = pre_tool_use
+        .as_array_of_tables_mut()
+        .context("PreToolUse key exists but is not an array — cannot write hook")?;
 
-    ptu_array.push(toml::Value::Table(matcher_entry));
+    if let Some(matcher) = pre_tool_use.iter_mut().find(|entry| {
+        entry
+            .get("matcher")
+            .and_then(Item::as_str)
+            .is_some_and(|matcher| matcher == "Bash")
+    }) {
+        let matcher_hooks = matcher
+            .entry("hooks")
+            .or_insert_with(|| Item::ArrayOfTables(ArrayOfTables::new()));
+        if let Some(matcher_hooks) = matcher_hooks.as_array_mut() {
+            let mut hook = InlineTable::new();
+            hook.insert("type", Value::from("command"));
+            hook.insert("command", Value::from(hook_command));
+            matcher_hooks.push(Value::InlineTable(hook));
+        } else {
+            let mut hook = Table::new();
+            hook.insert("type", Item::Value(Value::from("command")));
+            hook.insert("command", Item::Value(Value::from(hook_command)));
+            matcher_hooks
+                .as_array_of_tables_mut()
+                .context("Bash matcher hooks key is not an array")?
+                .push(hook);
+        }
+        return Ok(());
+    }
+
+    let mut hook = Table::new();
+    hook.insert("type", Item::Value(Value::from("command")));
+    hook.insert("command", Item::Value(Value::from(hook_command)));
+    let mut matcher = Table::new();
+    matcher.insert("matcher", Item::Value(Value::from("Bash")));
+    let mut matcher_hooks = ArrayOfTables::new();
+    matcher_hooks.push(hook);
+    matcher.insert("hooks", Item::ArrayOfTables(matcher_hooks));
+    pre_tool_use.push(matcher);
     Ok(())
 }
 
@@ -2427,7 +2444,7 @@ fn write_codex_hook_config(codex_dir: &Path, hook_command: &str, ctx: InitContex
     let config_path = codex_dir.join(CODEX_CONFIG_TOML);
     let InitContext { dry_run, .. } = ctx;
 
-    // Read and parse existing config, or start with an empty table.
+    // Parse with toml_edit so user comments and formatting survive the update.
     let existing_content = if config_path.exists() {
         Some(
             fs::read_to_string(&config_path)
@@ -2437,23 +2454,20 @@ fn write_codex_hook_config(codex_dir: &Path, hook_command: &str, ctx: InitContex
         None
     };
 
-    let mut root = match existing_content {
-        Some(ref s) => {
-            let val: toml::Value = s
-                .parse()
-                .with_context(|| format!("Failed to parse {}", config_path.display()))?;
-            match val {
-                toml::Value::Table(t) => t,
-                _ => anyhow::bail!(
-                    "{} is not a valid TOML table (unexpected top-level value)",
-                    config_path.display()
-                ),
-            }
-        }
-        None => toml::value::Table::new(),
-    };
+    let mut document = existing_content
+        .as_deref()
+        .unwrap_or("")
+        .parse::<toml_edit::DocumentMut>()
+        .with_context(|| format!("Failed to parse {}", config_path.display()))?;
+    let root = document
+        .to_string()
+        .parse::<toml::Value>()
+        .with_context(|| format!("Failed to parse {}", config_path.display()))?;
+    let root = root
+        .as_table()
+        .context("config.toml must contain a table")?;
 
-    if codex_hook_already_present(&root, hook_command) {
+    if codex_hook_already_present(root, hook_command) {
         return Ok(false);
     }
 
@@ -2465,8 +2479,8 @@ fn write_codex_hook_config(codex_dir: &Path, hook_command: &str, ctx: InitContex
         return Ok(true);
     }
 
-    insert_codex_hook_entry(&mut root, hook_command)?;
-    let output = toml::to_string(&root).context("Failed to serialize config.toml")?;
+    insert_codex_hook_entry_preserving_format(&mut document, hook_command)?;
+    let output = document.to_string();
 
     // Ensure parent directory exists (defensive — callers may skip mkdir).
     if let Some(parent) = config_path.parent() {
@@ -2510,17 +2524,16 @@ fn codex_hook_installed_at(codex_dir: &Path, hook_command: &str) -> bool {
     codex_hook_already_present(root, hook_command)
 }
 
-/// Count RTK hook occurrences across all PreToolUse matcher entries.
-fn count_codex_hooks(ptu: &[toml::Value], hook_command: &str) -> usize {
-    ptu.iter()
-        .filter_map(|entry| entry.get("hooks")?.as_array())
-        .flatten()
-        .filter(|h| {
-            h.get("command")
-                .and_then(|c| c.as_str())
-                .is_some_and(|cmd| cmd == hook_command)
-        })
-        .count()
+fn codex_hooks_explicitly_disabled_at(codex_dir: &Path) -> bool {
+    let config_path = codex_dir.join(CODEX_CONFIG_TOML);
+    let Ok(existing) = fs::read_to_string(config_path) else {
+        return false;
+    };
+    existing
+        .parse::<toml::Value>()
+        .ok()
+        .and_then(|root| root.get("features")?.get("hooks")?.as_bool())
+        == Some(false)
 }
 
 /// Uninstall RTK Codex hook from `config.toml` — removes matching PreToolUse entries.
@@ -2538,59 +2551,101 @@ fn uninstall_codex_hook_config(
 
     let existing = fs::read_to_string(&config_path)
         .with_context(|| format!("Failed to read {}", config_path.display()))?;
-    let val: toml::Value = existing
+    let mut document: toml_edit::DocumentMut = existing
         .parse()
         .with_context(|| format!("Failed to parse {}", config_path.display()))?;
-    let mut root = match val {
-        toml::Value::Table(t) => t,
-        _ => return Ok(Vec::new()), // non-table top-level: nothing to uninstall
-    };
 
     let mut removed = Vec::new();
-    if let Some(hooks) = root.get_mut("hooks").and_then(|h| h.as_table_mut()) {
-        if let Some(ptu) = hooks
-            .get_mut(PRE_TOOL_USE_KEY)
-            .and_then(|p| p.as_array_mut())
+    if let Some(hooks) = document
+        .as_table_mut()
+        .get_mut("hooks")
+        .and_then(toml_edit::Item::as_table_mut)
+    {
+        let mut pre_tool_use_empty = false;
+        let mut hook_removed = false;
+        let mut pre_tool_use = hooks.get_mut(PRE_TOOL_USE_KEY);
+        if let Some(pre_tool_use) = pre_tool_use
+            .as_deref_mut()
+            .and_then(toml_edit::Item::as_array_mut)
         {
-            let hook_count_before = count_codex_hooks(ptu, hook_command);
-            // Surgically remove only the RTK hook from each matcher entry,
-            // preserving any user hooks that coexist in the same entry.
-            for entry in ptu.iter_mut() {
-                if let Some(hooks_arr) = entry
-                    .as_table_mut()
-                    .and_then(|t| t.get_mut("hooks"))
-                    .and_then(|h| h.as_array_mut())
+            for matcher in pre_tool_use.iter_mut() {
+                if let Some(matcher_hooks) = matcher
+                    .as_inline_table_mut()
+                    .and_then(|matcher| matcher.get_mut("hooks"))
+                    .and_then(toml_edit::Value::as_array_mut)
                 {
-                    hooks_arr.retain(|h| {
-                        h.get("command")
-                            .and_then(|c| c.as_str())
-                            .is_none_or(|cmd| cmd != hook_command)
+                    let count_before = matcher_hooks.len();
+                    matcher_hooks.retain(|hook| {
+                        hook.as_inline_table()
+                            .and_then(|hook| hook.get("command"))
+                            .and_then(toml_edit::Value::as_str)
+                            .is_none_or(|command| command != hook_command)
                     });
+                    hook_removed |= matcher_hooks.len() < count_before;
                 }
             }
-            // Remove matcher entries whose hooks array is now empty.
-            ptu.retain(|entry| {
-                entry
-                    .get("hooks")
-                    .and_then(|h| h.as_array())
-                    .map(|hooks| !hooks.is_empty())
-                    .unwrap_or(true)
+            pre_tool_use.retain(|matcher| {
+                matcher
+                    .as_inline_table()
+                    .and_then(|matcher| matcher.get("hooks"))
+                    .and_then(toml_edit::Value::as_array)
+                    .is_none_or(|matcher_hooks| !matcher_hooks.is_empty())
             });
-            let hook_count_after = count_codex_hooks(ptu, hook_command);
-            if hook_count_after < hook_count_before {
-                removed.push(format!(
-                    "Removed RTK PreToolUse hook from {}",
-                    config_path.display()
-                ));
-                if ptu.is_empty() {
-                    hooks.remove(PRE_TOOL_USE_KEY);
+            pre_tool_use_empty = pre_tool_use.is_empty();
+        } else if let Some(pre_tool_use) =
+            pre_tool_use.and_then(toml_edit::Item::as_array_of_tables_mut)
+        {
+            for matcher in pre_tool_use.iter_mut() {
+                let Some(matcher_hooks) = matcher.get_mut("hooks") else {
+                    continue;
+                };
+                if let Some(matcher_hooks) = matcher_hooks.as_array_mut() {
+                    let count_before = matcher_hooks.len();
+                    matcher_hooks.retain(|hook| {
+                        hook.as_inline_table()
+                            .and_then(|hook| hook.get("command"))
+                            .and_then(toml_edit::Value::as_str)
+                            .is_none_or(|command| command != hook_command)
+                    });
+                    hook_removed |= matcher_hooks.len() < count_before;
+                } else if let Some(matcher_hooks) = matcher_hooks.as_array_of_tables_mut() {
+                    let count_before = matcher_hooks.len();
+                    matcher_hooks.retain(|hook| {
+                        hook.get("command")
+                            .and_then(toml_edit::Item::as_str)
+                            .is_none_or(|command| command != hook_command)
+                    });
+                    hook_removed |= matcher_hooks.len() < count_before;
                 }
             }
+            pre_tool_use.retain(|matcher| {
+                matcher.get("hooks").is_none_or(|matcher_hooks| {
+                    matcher_hooks
+                        .as_array()
+                        .map(|hooks| !hooks.is_empty())
+                        .or_else(|| {
+                            matcher_hooks
+                                .as_array_of_tables()
+                                .map(|hooks| !hooks.is_empty())
+                        })
+                        .unwrap_or(true)
+                })
+            });
+            pre_tool_use_empty = pre_tool_use.is_empty();
+        }
+        if hook_removed {
+            removed.push(format!(
+                "Removed RTK PreToolUse hook from {}",
+                config_path.display()
+            ));
+        }
+        if pre_tool_use_empty {
+            hooks.remove(PRE_TOOL_USE_KEY);
         }
     }
 
     if !removed.is_empty() && !dry_run {
-        let output = toml::to_string(&root).context("Failed to serialize config.toml")?;
+        let output = document.to_string();
         atomic_write(&config_path, &output)
             .with_context(|| format!("Failed to write {}", config_path.display()))?;
     }
@@ -2641,6 +2696,10 @@ fn run_codex_mode_at(codex_dir: &Path, ctx: InitContext) -> Result<()> {
         if rtk_md_path.exists() {
             println!("  RTK.md:       {}", rtk_md_path.display());
         }
+        if codex_hooks_explicitly_disabled_at(codex_dir) {
+            println!("  Warning:      Codex hooks are disabled by `hooks = false` in [features]");
+        }
+        println!("  Next:         Run `/hooks` in Codex to review and trust this hook");
     }
 
     Ok(())

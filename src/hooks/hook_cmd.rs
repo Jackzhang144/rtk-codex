@@ -5,7 +5,7 @@
 
 use super::constants::PRE_TOOL_USE_KEY;
 use super::permissions::{self, PermissionVerdict};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::{json, Value};
 use std::io::{self, Read, Write};
 
@@ -13,16 +13,29 @@ use crate::discover::registry::{has_heredoc, rewrite_command};
 
 const STDIN_CAP: usize = 1_048_576; // 1 MiB
 
-fn read_stdin_limited() -> Result<String> {
-    let mut input = String::new();
-    io::stdin()
+fn read_stdin_limited() -> String {
+    let mut input = Vec::new();
+    if let Err(error) = io::stdin()
         .take((STDIN_CAP + 1) as u64)
-        .read_to_string(&mut input)
-        .context("Failed to read stdin")?;
-    if input.len() > STDIN_CAP {
-        anyhow::bail!("hook stdin exceeds {} byte limit", STDIN_CAP);
+        .read_to_end(&mut input)
+    {
+        let _ = writeln!(io::stderr(), "[rtk hook] failed to read stdin: {error}");
+        return String::new();
     }
-    Ok(input)
+    if input.len() > STDIN_CAP {
+        let _ = writeln!(
+            io::stderr(),
+            "[rtk hook] stdin exceeds {STDIN_CAP} byte limit; passing through"
+        );
+        return String::new();
+    }
+    match String::from_utf8(input) {
+        Ok(input) => input,
+        Err(error) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] stdin is not UTF-8: {error}");
+            String::new()
+        }
+    }
 }
 
 // ── Copilot hook (VS Code + Copilot CLI) ──────────────────────
@@ -42,7 +55,7 @@ enum HookFormat {
 /// Run the Copilot preToolUse hook.
 /// Auto-detects VS Code Copilot Chat vs Copilot CLI format.
 pub fn run_copilot() -> Result<()> {
-    let input = read_stdin_limited()?;
+    let input = read_stdin_limited();
 
     // Strip leading BOM(s) before trimming: some Windows hosts prepend UTF-8
     // BOMs to hook stdin (confirmed for Cursor), which serde_json rejects.
@@ -163,10 +176,9 @@ fn decide_hook_action_from_verdict(
     verdict: PermissionVerdict,
 ) -> HookDecision {
     match decide_from_verdict(cmd, verdict) {
-        HookDecision::DefaultRewrite(r) if host == permissions::Host::Codex => {
-            HookDecision::AllowRewrite(r)
+        HookDecision::DefaultRewrite(r) if host != permissions::Host::Codex => {
+            HookDecision::AskRewrite(r)
         }
-        HookDecision::DefaultRewrite(r) => HookDecision::AskRewrite(r),
         decision => decision,
     }
 }
@@ -247,9 +259,22 @@ fn copilot_cli_response_from_decision(
 
 /// Run the Gemini CLI BeforeTool hook.
 pub fn run_gemini() -> Result<()> {
-    let input = read_stdin_limited()?;
-
-    let json: Value = serde_json::from_str(&input).context("Failed to parse hook input as JSON")?;
+    let input = read_stdin_limited();
+    if input.trim().is_empty() {
+        print_allow();
+        return Ok(());
+    }
+    let json: Value = match serde_json::from_str(&input) {
+        Ok(json) => json,
+        Err(error) => {
+            let _ = writeln!(
+                io::stderr(),
+                "[rtk hook] Failed to parse JSON input: {error}"
+            );
+            print_allow();
+            return Ok(());
+        }
+    };
 
     let tool_name = json.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -357,6 +382,10 @@ enum PayloadAction {
         rewritten: String,
         output: Value,
     },
+    Deny {
+        cmd: String,
+        output: Value,
+    },
     Skip {
         reason: &'static str,
         cmd: String,
@@ -384,6 +413,18 @@ fn process_payload_decision(
     decision: HookDecision,
 ) -> PayloadAction {
     let (rewritten, allow) = match decision {
+        HookDecision::Deny if host == permissions::Host::Codex => {
+            return PayloadAction::Deny {
+                cmd: cmd.to_string(),
+                output: json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": PRE_TOOL_USE_KEY,
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": "RTK policy denied command"
+                    }
+                }),
+            };
+        }
         HookDecision::Deny => {
             return PayloadAction::Skip {
                 reason: "skip:deny_rule",
@@ -396,6 +437,12 @@ fn process_payload_decision(
                 cmd: cmd.to_string(),
             }
         }
+        HookDecision::AllowRewrite(_) if host == permissions::Host::Codex => {
+            return PayloadAction::Skip {
+                reason: "skip:codex_preserve_approval",
+                cmd: cmd.to_string(),
+            }
+        }
         HookDecision::AllowRewrite(r) => (r, true),
         HookDecision::AskRewrite(_) if host == permissions::Host::Codex => {
             return PayloadAction::Skip {
@@ -403,7 +450,12 @@ fn process_payload_decision(
                 cmd: cmd.to_string(),
             }
         }
-        HookDecision::DefaultRewrite(r) if host == permissions::Host::Codex => (r, true),
+        HookDecision::DefaultRewrite(_) if host == permissions::Host::Codex => {
+            return PayloadAction::Skip {
+                reason: "skip:codex_preserve_approval",
+                cmd: cmd.to_string(),
+            }
+        }
         HookDecision::AskRewrite(r) => (r, false),
         HookDecision::DefaultRewrite(r) => (r, false),
     };
@@ -436,7 +488,7 @@ fn process_payload_decision(
 }
 
 fn run_host_hook(host: permissions::Host) -> Result<()> {
-    let input = read_stdin_limited()?;
+    let input = read_stdin_limited();
 
     let input = strip_leading_bom(&input).trim();
     if input.is_empty() {
@@ -460,6 +512,10 @@ fn run_host_hook(host: permissions::Host) -> Result<()> {
             audit_log("rewrite", &cmd, &rewritten);
             let _ = writeln!(io::stdout(), "{output}");
         }
+        PayloadAction::Deny { cmd, output } => {
+            audit_log("deny", &cmd, "");
+            let _ = writeln!(io::stdout(), "{output}");
+        }
         PayloadAction::Skip { reason, cmd } => {
             audit_log(reason, &cmd, "");
         }
@@ -478,7 +534,9 @@ pub fn run_claude() -> Result<()> {
 fn run_claude_inner(input: &str) -> Option<String> {
     let v: Value = serde_json::from_str(input).ok()?;
     match process_payload(&v, permissions::Host::Claude) {
-        PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
+        PayloadAction::Rewrite { output, .. } | PayloadAction::Deny { output, .. } => {
+            Some(output.to_string())
+        }
         _ => None,
     }
 }
@@ -511,7 +569,7 @@ fn strip_leading_bom(input: &str) -> &str {
 
 /// Run the Cursor Agent hook natively.
 pub fn run_cursor() -> Result<()> {
-    let input = read_stdin_limited()?;
+    let input = read_stdin_limited();
 
     let input = strip_leading_bom(&input).trim();
     if input.is_empty() {
@@ -685,7 +743,7 @@ fn droid_response_from_decision(v: &Value, cmd: &str, decision: HookDecision) ->
 
 /// Run the Factory Droid PreToolUse hook natively.
 pub fn run_droid() -> Result<()> {
-    let input = read_stdin_limited()?;
+    let input = read_stdin_limited();
     let input = strip_leading_bom(&input).trim();
     if input.is_empty() {
         return Ok(());
@@ -1441,7 +1499,9 @@ mod tests {
     fn run_codex_inner(input: &str) -> Option<String> {
         let v: Value = serde_json::from_str(input).ok()?;
         match process_payload(&v, permissions::Host::Codex) {
-            PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
+            PayloadAction::Rewrite { output, .. } | PayloadAction::Deny { output, .. } => {
+                Some(output.to_string())
+            }
             _ => None,
         }
     }
@@ -1456,7 +1516,9 @@ mod tests {
         let cmd = v.pointer("/tool_input/command").and_then(|c| c.as_str())?;
         let decision = decide_hook_action_from_verdict(cmd, host, verdict);
         match process_payload_decision(&v, host, cmd, decision) {
-            PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
+            PayloadAction::Rewrite { output, .. } | PayloadAction::Deny { output, .. } => {
+                Some(output.to_string())
+            }
             _ => None,
         }
     }
@@ -1467,30 +1529,21 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_allow_rewrite_git_status() {
-        let result =
-            run_codex_inner_with_verdict(&claude_input("git status"), PermissionVerdict::Allow)
-                .unwrap();
-        let v: Value = serde_json::from_str(&result).unwrap();
-        let cmd = v
-            .pointer("/hookSpecificOutput/updatedInput/command")
-            .and_then(|c| c.as_str())
-            .unwrap();
-        assert_eq!(cmd, "rtk git status");
-        assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "allow");
+    fn test_codex_allow_verdict_does_not_bypass_native_approval() {
+        assert!(run_codex_inner_with_verdict(
+            &claude_input("git status"),
+            PermissionVerdict::Allow
+        )
+        .is_none());
     }
 
     #[test]
-    fn test_codex_default_rewrite_auto_allows() {
-        let result =
-            run_codex_inner_with_verdict(&claude_input("git status"), PermissionVerdict::Default)
-                .unwrap();
-        let v: Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(
-            v.pointer("/hookSpecificOutput/updatedInput/command"),
-            Some(&json!("rtk git status"))
-        );
-        assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "allow");
+    fn test_codex_default_preserves_native_approval() {
+        assert!(run_codex_inner_with_verdict(
+            &claude_input("git status"),
+            PermissionVerdict::Default
+        )
+        .is_none());
     }
 
     #[test]
@@ -1502,11 +1555,12 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_explicit_deny_emits_no_hook_json() {
-        assert!(
+    fn test_codex_explicit_deny_emits_deny_decision() {
+        let result =
             run_codex_inner_with_verdict(&claude_input("git status"), PermissionVerdict::Deny)
-                .is_none()
-        );
+                .unwrap();
+        let output: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "deny");
     }
 
     #[test]
@@ -1521,17 +1575,11 @@ mod tests {
 
     #[test]
     fn test_codex_env_prefix_preserved() {
-        let result = run_codex_inner_with_verdict(
+        assert!(run_codex_inner_with_verdict(
             &claude_input("GIT_PAGER=cat git status"),
             PermissionVerdict::Default,
         )
-        .unwrap();
-        let v: Value = serde_json::from_str(&result).unwrap();
-        let cmd = v
-            .pointer("/hookSpecificOutput/updatedInput/command")
-            .and_then(|c| c.as_str())
-            .unwrap();
-        assert!(cmd.starts_with("GIT_PAGER=cat rtk git status"));
+        .is_none());
     }
 
     #[test]

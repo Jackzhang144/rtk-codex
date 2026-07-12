@@ -28,7 +28,7 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 | Claude-MD (legacy) | `rtk init --claude-md` | 134-line RTK block | CLAUDE.md |
 | Windsurf | `rtk init -g --agent windsurf` | `.windsurfrules` | -- |
 | Cline | `rtk init --agent cline` | `.clinerules` | -- |
-| Codex | `rtk init --codex` | RTK.md in `$CODEX_HOME` or `~/.codex` | AGENTS.md |
+| Codex | `rtk init --codex` | `.codex/config.toml`, `.codex/RTK.md` (or global equivalents with `-g`) | config.toml |
 | Cursor | `rtk init -g --agent cursor` | Cursor hook | hooks.json |
 | Pi | `rtk init --agent pi` | `.pi/extensions/rtk.ts` | -- |
 | Hermes | `rtk init --agent hermes` | Python plugin in `~/.hermes/plugins/rtk-rewrite/` | `config.yaml` `plugins.enabled` |
@@ -71,7 +71,7 @@ RTK enforces a permission precedence that matches Claude Code's least-privilege 
 Deny > Ask > Allow (explicit) > Default (ask)
 ```
 
-Rules are loaded from all Claude Code `settings.json` files (project + global, including `.local` variants). Only `Bash(...)` rules are extracted; other scopes (Read, Write) are ignored.
+Rules are loaded from all Claude Code `settings.json` files (project + global, including `.local` variants). Only `Bash(...)` rules are extracted; other scopes (Read, Write) are ignored. Codex does not reuse these rules because its approval model and Hook protocol differ.
 
 | Verdict | Trigger | rewrite_cmd exit | Hook behavior |
 |---------|---------|-----------------|---------------|
@@ -89,11 +89,13 @@ Rules are loaded from all Claude Code `settings.json` files (project + global, i
 | Cursor (rtk hook cursor) | Ready | `permission: "ask",` — users will be prompted when Cursor enforces the permission; in the meantime, allow |
 | Gemini CLI (rtk hook gemini) | No (allow/deny only) | allow (limitation — no ask mode in Gemini) |
 | Copilot CLI (rtk hook copilot) | No updatedInput | deny-with-suggestion (unchanged) |
-| Codex | ask parsed but no-op | allow (limitation — fails open) |
+| Codex | No (`ask` is unsupported) | no decision; Codex keeps its native approval behavior |
+
+Codex command rewriting requires `permissionDecision = "allow"` together with `updatedInput`, which also authorizes the rewritten call. RTK therefore does not rewrite from `PreToolUse` unless a future Codex-specific policy can independently prove the call safe. `PermissionRequest` cannot rewrite commands. Treat this Hook as a guardrail, not a complete security boundary, and review project hooks with `/hooks` before trusting them.
 
 ### Implementation
 
-- `permissions.rs` — loads deny/ask/allow rules, evaluates precedence, returns `PermissionVerdict`
+- `permissions.rs` — loads host-specific deny/ask/allow rules, evaluates precedence, returns `PermissionVerdict`; Codex currently returns `Default`
 - `rewrite_cmd.rs` — maps verdict to exit code (consumed by shell hook)
 - `hook_cmd.rs` — maps verdict to JSON `permissionDecision` field (Copilot/Gemini)
 

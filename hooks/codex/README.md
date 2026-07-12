@@ -4,6 +4,7 @@
 
 ## Specifics
 
-- Prompt-level guidance via awareness document -- no programmatic hook
-- `rtk-awareness.md` is injected into `AGENTS.md` with an `@RTK.md` reference
-- Installed to `$CODEX_HOME` when set, otherwise `~/.codex/`, by `rtk init --codex`
+- Prompt-level guidance via `RTK.md`, plus a native `PreToolUse` guardrail
+- The guardrail does not rewrite or approve commands by default, preserving Codex's own approval policy
+- Local install writes `.codex/config.toml`; global install uses `$CODEX_HOME` or `~/.codex/`
+- Run `/hooks` in Codex after installation to review and trust the hook

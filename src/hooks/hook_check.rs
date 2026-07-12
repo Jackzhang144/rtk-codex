@@ -24,54 +24,73 @@ pub enum HookStatus {
 }
 
 /// Return the current hook status without printing anything.
-/// Returns `Ok` if no Claude Code is detected (not applicable).
+/// Returns `Ok` if no supported Hook installation is detected.
 pub fn status() -> HookStatus {
-    // Don't warn users who don't have Claude Code installed
     let claude_dir = resolve_claude_dir().ok();
-    let codex_dir = resolve_codex_dir().ok();
-    status_at(claude_dir.as_deref(), codex_dir.as_deref())
+    let global_codex_dir = resolve_codex_dir().ok();
+    let mut codex_dirs = vec![Path::new(".codex")];
+    if let Some(global_codex_dir) = global_codex_dir.as_deref() {
+        codex_dirs.push(global_codex_dir);
+    }
+    status_with_codex_dirs(claude_dir.as_deref(), &codex_dirs)
 }
 
+#[cfg(test)]
 fn status_at(claude_dir: Option<&Path>, codex_dir: Option<&Path>) -> HookStatus {
-    let Some(claude_dir) = claude_dir else {
-        return HookStatus::Ok;
-    };
+    let codex_dirs = codex_dir.into_iter().collect::<Vec<_>>();
+    status_with_codex_dirs(claude_dir, &codex_dirs)
+}
+
+fn status_with_codex_dirs(claude_dir: Option<&Path>, codex_dirs: &[&Path]) -> HookStatus {
+    let statuses = [claude_status_at(claude_dir), codex_status_at(codex_dirs)];
+    if statuses.contains(&Some(HookStatus::Outdated)) {
+        HookStatus::Outdated
+    } else if statuses.contains(&Some(HookStatus::Missing)) {
+        HookStatus::Missing
+    } else {
+        HookStatus::Ok
+    }
+}
+
+fn claude_status_at(claude_dir: Option<&Path>) -> Option<HookStatus> {
+    let claude_dir = claude_dir?;
     if !claude_dir.exists() {
-        return HookStatus::Ok;
+        return None;
     }
 
-    let claude_status = if binary_hook_registered(claude_dir) {
+    if binary_hook_registered(claude_dir) {
         // If old script file still exists alongside new command, report Outdated
         // (migration not complete — user should run `rtk init -g` to clean up)
         let old_hook = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
         if old_hook.exists() {
-            HookStatus::Outdated
+            Some(HookStatus::Outdated)
         } else {
-            HookStatus::Ok
+            Some(HookStatus::Ok)
         }
     } else {
         // Fall back to legacy script file check
-        let Some(hook_path) = hook_installed_path() else {
-            return suppress_if_codex_hook_present(HookStatus::Missing, codex_dir);
-        };
+        let hook_path = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
+        if !hook_path.exists() {
+            return Some(HookStatus::Missing);
+        }
         let Ok(content) = std::fs::read_to_string(&hook_path) else {
-            return suppress_if_codex_hook_present(HookStatus::Outdated, codex_dir);
+            return Some(HookStatus::Outdated);
         };
         if parse_hook_version(&content) >= CURRENT_HOOK_VERSION {
-            HookStatus::Ok
+            Some(HookStatus::Ok)
         } else {
-            HookStatus::Outdated
+            Some(HookStatus::Outdated)
         }
-    };
-
-    suppress_if_codex_hook_present(claude_status, codex_dir)
+    }
 }
 
-fn suppress_if_codex_hook_present(status: HookStatus, codex_dir: Option<&Path>) -> HookStatus {
-    if status != HookStatus::Ok && codex_dir.is_some_and(codex_hook_registered_at) {
-        HookStatus::Ok
+fn codex_status_at(codex_dirs: &[&Path]) -> Option<HookStatus> {
+    if codex_dirs.iter().any(|dir| codex_hook_registered_at(dir)) {
+        Some(HookStatus::Ok)
+    } else if codex_dirs.iter().any(|dir| dir.exists()) {
+        Some(HookStatus::Missing)
     } else {
-        status
+        None
     }
 }
 
@@ -87,6 +106,14 @@ fn codex_hook_registered_at(codex_dir: &Path) -> bool {
     let Some(root) = value.as_table() else {
         return false;
     };
+    if root
+        .get("features")
+        .and_then(|features| features.get("hooks"))
+        .and_then(toml::Value::as_bool)
+        == Some(false)
+    {
+        return false;
+    }
     let Some(hooks) = root.get("hooks").and_then(|hooks| hooks.as_table()) else {
         return false;
     };
@@ -177,16 +204,6 @@ pub fn parse_hook_version(content: &str) -> u8 {
         }
     }
     0 // No version tag = version 0 (outdated)
-}
-
-fn hook_installed_path() -> Option<PathBuf> {
-    let claude_dir = resolve_claude_dir().ok()?;
-    let path = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
-    if path.exists() {
-        Some(path)
-    } else {
-        None
-    }
 }
 
 fn warn_marker_path() -> Option<PathBuf> {
@@ -398,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn test_status_ignores_missing_claude_hook_when_codex_is_installed() {
+    fn test_codex_hook_does_not_mask_missing_claude_hook() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let claude_dir = tmp.path().join(".claude");
         std::fs::create_dir_all(&claude_dir).unwrap();
@@ -416,6 +433,74 @@ mod tests {
 
         assert_eq!(
             status_at(Some(&claude_dir), codex_config.parent()),
+            HookStatus::Missing
+        );
+    }
+
+    #[test]
+    fn test_codex_hook_is_not_registered_when_hooks_feature_is_disabled() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join(CODEX_CONFIG_TOML),
+            format!(
+                "[features]\nhooks = false\n[hooks]\nPreToolUse = [\n  {{ matcher = \"Bash\", hooks = [\n    {{ type = \"command\", command = \"{}\" }}\n  ]}}\n]\n",
+                CODEX_HOOK_COMMAND
+            ),
+        )
+        .unwrap();
+
+        assert!(!codex_hook_registered_at(tmp.path()));
+    }
+
+    #[test]
+    fn test_disabled_codex_hook_is_not_masked_by_working_claude_hook() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let claude_dir = tmp.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(
+            claude_dir.join(SETTINGS_JSON),
+            format!(
+                r#"{{"hooks":{{"PreToolUse":[{{"matcher":"Bash","hooks":[{{"type":"command","command":"{}"}}]}}]}}}}"#,
+                crate::hooks::constants::CLAUDE_HOOK_COMMAND
+            ),
+        )
+        .unwrap();
+
+        let codex_dir = tmp.path().join(".codex");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        std::fs::write(
+            codex_dir.join(CODEX_CONFIG_TOML),
+            format!(
+                "[features]\nhooks = false\n[hooks]\nPreToolUse = [{{ matcher = \"Bash\", hooks = [{{ type = \"command\", command = \"{}\" }}] }}]\n",
+                CODEX_HOOK_COMMAND
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            status_at(Some(&claude_dir), Some(&codex_dir)),
+            HookStatus::Missing
+        );
+    }
+
+    #[test]
+    fn test_local_codex_hook_satisfies_codex_status_when_global_is_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let local_codex = tmp.path().join("project/.codex");
+        let global_codex = tmp.path().join("home/.codex");
+        std::fs::create_dir_all(&local_codex).unwrap();
+        std::fs::create_dir_all(&global_codex).unwrap();
+        std::fs::write(
+            local_codex.join(CODEX_CONFIG_TOML),
+            format!(
+                "[hooks]\nPreToolUse = [{{ matcher = \"Bash\", hooks = [{{ type = \"command\", command = \"{}\" }}] }}]\n",
+                CODEX_HOOK_COMMAND
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            status_with_codex_dirs(None, &[local_codex.as_path(), global_codex.as_path()]),
             HookStatus::Ok
         );
     }

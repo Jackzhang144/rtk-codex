@@ -382,7 +382,7 @@ enum Commands {
         #[arg(long)]
         uninstall: bool,
 
-        /// Target Codex CLI (uses AGENTS.md + RTK.md, no Claude hook patching)
+        /// Target Codex CLI (RTK.md guidance + native PreToolUse guardrail)
         #[arg(long)]
         codex: bool,
 
