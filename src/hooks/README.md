@@ -15,7 +15,7 @@ Boundary notes:
 - `trust.rs` gates project-local TOML filter execution. It lives here because the trust workflow is tied to hook-installed filter discovery, not to the core filter engine.
 
 ## Purpose
-LLM agent integration layer that installs, validates, and executes command-rewriting hooks for AI coding assistants. Hooks intercept raw CLI commands (e.g., `git status`) and rewrite them to RTK equivalents (e.g., `rtk git status`) so that LLM agents automatically benefit from token savings without explicit user configuration.
+LLM agent integration layer that installs, validates, and executes Hooks for AI coding assistants. Most integrations intercept raw CLI commands (e.g., `git status`) and rewrite them to RTK equivalents (e.g., `rtk git status`). Codex instead combines `RTK.md` guidance with a non-authorizing Hook, so Codex invokes `rtk` directly while retaining its native approval behavior.
 
 ## Installation Modes
 
@@ -33,6 +33,7 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 | Pi | `rtk init --agent pi` | `.pi/extensions/rtk.ts` | -- |
 | Hermes | `rtk init --agent hermes` | Python plugin in `~/.hermes/plugins/rtk-rewrite/` | `config.yaml` `plugins.enabled` |
 
+Codex writes its TOML configuration directly and does not accept `--auto-patch` or `--no-patch`. Both local and global installs have matching `--uninstall` flows.
 
 ## Integrity Verification
 
@@ -97,11 +98,11 @@ Codex command rewriting requires `permissionDecision = "allow"` together with `u
 
 - `permissions.rs` — loads host-specific deny/ask/allow rules, evaluates precedence, returns `PermissionVerdict`; Codex currently returns `Default`
 - `rewrite_cmd.rs` — maps verdict to exit code (consumed by shell hook)
-- `hook_cmd.rs` — maps verdict to JSON `permissionDecision` field (Copilot/Gemini)
+- `hook_cmd.rs` — maps verdicts to host-specific JSON for Copilot, Gemini, Codex, Cursor, and Droid
 
 ## Exit Code Contract
 
 Hook processors in `hook_cmd.rs` must return `Ok(())` on every path — success, no-match, parse error, and unexpected input. Returning `Err` propagates to `main()` and exits non-zero, which blocks the agent's command from executing. This violates the non-blocking guarantee documented in `hooks/README.md`.
 
 ## Adding New Functionality
-To add support for a new AI coding agent: (1) add the hook installation logic to `init.rs` following the existing agent patterns, (2) if the agent requires a custom hook protocol (like Gemini's `BeforeTool`), add a processor function in `hook_cmd.rs`, (3) add the agent's hook file path to `hook_check.rs` for validation, and (4) update `integrity.rs` with the expected hash for the new hook file. Test by running `rtk init` in a fresh environment and verifying the hook rewrites commands correctly in the target agent.
+To add support for a new AI coding agent: (1) add the hook installation logic to `init.rs` following the existing agent patterns, (2) if the agent requires a custom hook protocol (like Gemini's `BeforeTool`), add a processor function in `hook_cmd.rs`, (3) add the agent's Hook path or configuration to `hook_check.rs`, and (4) update `integrity.rs` when the integration installs a hashed Hook file. Test installation, uninstall, malformed input, and the exact host decision semantics; do not assume every host can safely combine rewriting with approval.

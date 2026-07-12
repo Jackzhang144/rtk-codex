@@ -12,7 +12,7 @@ Relationship to `src/hooks/`: that component **creates** these files; this direc
 
 ## Purpose
 
-LLM agent integrations that intercept CLI commands and route them through RTK for token optimization. Each hook transparently rewrites raw commands (e.g., `git status`) to their RTK equivalents (e.g., `rtk git status`), delivering 60-90% token savings without requiring the agent or user to change their workflow.
+LLM agent integrations that route CLI commands through RTK for token optimization. Most Hooks transparently rewrite raw commands (e.g., `git status`) to their RTK equivalents (e.g., `rtk git status`). Codex is intentionally different: `RTK.md` guides the agent to invoke `rtk` directly, while its Hook preserves Codex's native approval flow.
 
 ## How It Works
 
@@ -27,7 +27,7 @@ Agent runs command (e.g., "cargo test --nocapture")
   -> Filtered output reaches LLM (~90% fewer tokens)
 ```
 
-All rewrite logic lives in the Rust binary (`src/discover/registry.rs`). Hook scripts are **thin delegates** that handle agent-specific JSON formats and call `rtk rewrite` for the actual decision. This ensures a single source of truth for all 70+ rewrite patterns.
+All rewrite logic lives in the Rust binary (`src/discover/registry.rs`). Hook scripts are **thin delegates** that handle agent-specific JSON formats and call `rtk rewrite` for the actual decision. Codex does not apply the returned rewrite by default because doing so would also authorize the command.
 
 ## Directory Structure
 
@@ -58,6 +58,8 @@ Each agent subdirectory has its own README with hook-specific details:
 | OpenCode | TypeScript plugin (`tool.execute.before`) | In-place mutation | Yes |
 | Pi | TypeScript extension (`tool_call` event) | In-place mutation | Yes |
 | Hermes | Python plugin (`pre_tool_call`) | In-place mutation | Yes |
+
+For Codex, Allow, Ask, and Default produce no Hook output. An explicit Deny produces `permissionDecision: "deny"`. RTK never imports Claude Code permission rules into this decision and currently exposes no Codex-specific permission-list configuration.
 
 ## JSON Formats by Agent
 
@@ -132,6 +134,33 @@ Returns `{}` when no rewrite (Cursor requires JSON for all paths).
 ```
 
 **Output**: Same as Claude Code format (with `updatedInput`).
+
+### Codex CLI (Rust Binary)
+
+**Input** (stdin):
+
+```json
+{
+  "tool_name": "Bash",
+  "tool_input": { "command": "git status" }
+}
+```
+
+**Output** for Allow, Ask, or Default: empty stdout and exit 0. Codex continues with its own approval and sandbox policy.
+
+**Output** for an explicit Deny:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "deny",
+    "permissionDecisionReason": "RTK policy denied command"
+  }
+}
+```
+
+RTK does not send `allow + updatedInput`: in Codex that combination both rewrites and authorizes the call. Run `/hooks` after installation to review and trust the Hook.
 
 ### Gemini CLI (Rust Binary)
 
@@ -242,7 +271,8 @@ New integrations must follow the [Exit Code Contract](#exit-code-contract) and [
 |------|-----------|-------------|----------|
 | **Full hook** | Shell script or Rust binary, intercepts commands via agent's hook API | High — must track agent API changes | Claude Code, Cursor, Copilot, Gemini |
 | **Plugin** | TypeScript/JS/Python plugin in agent's plugin system | Medium — agent manages loading | OpenCode, Hermes, Pi |
-| **Rules file** | Prompt-level instructions the agent reads | Low — no code to break | Cline, Windsurf, Codex |
+| **Rules file** | Prompt-level instructions the agent reads | Low — no code to break | Cline, Windsurf |
+| **Guidance + guardrail** | Prompt instructions plus a non-authorizing Hook | Medium — Hook protocol must remain compatible | Codex |
 
 ### Eligibility
 

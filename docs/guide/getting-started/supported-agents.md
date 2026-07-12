@@ -181,6 +181,15 @@ rtk init --global --codex  # user-global ($CODEX_HOME or ~/.codex)
 
 After installation, run `/hooks` in Codex to review and trust the hook. RTK does not return `allow + updatedInput` by default, so Codex keeps its native approval behavior.
 
+The integration relies on `RTK.md` for command selection: Codex should call `rtk git status`, `rtk cargo test`, and similar commands directly. The registered `PreToolUse` Hook is a non-authorizing guardrail, not a transparent rewrite layer. Routine calls produce no Hook decision, and Codex does not reuse Claude Code permission rules. RTK currently exposes no Codex-specific permission-list configuration.
+
+If `[features] hooks = false` is set, enable Hooks before expecting the guardrail to run. Project and plugin Hooks must also be reviewed and trusted through `/hooks`.
+
+```bash
+rtk init --codex --uninstall     # remove project-scoped artifacts
+rtk init -g --codex --uninstall  # remove global artifacts
+```
+
 ### Kilo Code
 
 ```bash
@@ -208,8 +217,9 @@ Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://
 | **Full hook** | Shell script or Rust binary, intercepts via agent API | Transparent — agent never sees the raw command |
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
+| **Guidance + guardrail** | Prompt guidance plus a non-authorizing Hook | Agent invokes `rtk` directly; Hook preserves native approval |
 
-Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
+Rules file integrations (Cline, Windsurf, Kilo Code, Antigravity) rely on the model following instructions. Codex uses the guidance + guardrail tier and also relies on `RTK.md` for adoption; its Hook does not rewrite by default. Full hook integrations (Claude Code, Cursor, Gemini) rewrite before execution. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
 
 ## Windows support
 

@@ -105,7 +105,8 @@ rtk gain        # Should show token savings stats
 # 1. Install for your AI tool
 rtk init -g                     # Claude Code / Copilot (default)
 rtk init -g --gemini            # Gemini CLI
-rtk init -g --codex             # Codex (OpenAI)
+rtk init --codex                # Codex project config
+rtk init -g --codex             # Codex global config
 rtk init -g --agent cursor      # Cursor
 rtk init -g --agent windsurf    # Windsurf
 rtk init --agent cline          # Cline / Roo Code
@@ -366,7 +367,7 @@ rtk init -g
 
 ## Supported AI Tools
 
-RTK supports 15 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents for 60-90% token savings where the agent supports command interception.
+RTK supports 15 AI coding tools through transparent rewrites, plugins, or prompt guidance, depending on the host's capabilities and permission model.
 
 | Tool | Install | Method |
 |------|---------|--------|
@@ -386,6 +387,8 @@ RTK supports 15 AI coding tools. Each integration rewrites shell commands to `rt
 | **Kilo Code** | `rtk init --agent kilocode` | .kilocode/rules/rtk-rules.md (project-scoped) |
 | **Google Antigravity** | `rtk init --agent antigravity` | .agents/rules/antigravity-rtk-rules.md (project-scoped) |
 | **Factory Droid** | `rtk init -g --agent droid` (or per-project) | PreToolUse hook in `~/.factory/hooks.json` (matcher `Execute`) |
+
+Codex is intentionally different from transparent-rewrite integrations: its Hook does not emit `allow + updatedInput`, because that would also bypass Codex's normal approval decision. Token savings therefore depend on Codex following `RTK.md` and invoking `rtk` directly. Run `/hooks` after installation to review and trust the Hook.
 
 For per-agent setup details, override controls, and graceful degradation, see the [Supported Agents guide](https://www.rtk-ai.app/guide/getting-started/supported-agents). The Hermes plugin source and tests live in `hooks/hermes/`; installed Hermes runtime files still live under `~/.hermes/plugins/rtk-rewrite/`.
 

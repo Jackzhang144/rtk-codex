@@ -75,13 +75,13 @@ The user runs `rtk init` to set up hooks for their LLM agent. This:
 3. Patches the agent's settings file (e.g., `settings.json`) to register the hook
 4. Writes RTK awareness instructions (e.g., `RTK.md`) for prompt-level guidance
 
-RTK supports 7 agents, each with its own installation mode. The hook scripts are embedded in the binary and written at install time.
+RTK supports multiple agents with Hook, plugin, and prompt-guidance installation modes. Native Hook processors live in the binary; some integrations also install scripts, plugins, or awareness documents.
 
 > **Details**: [`src/hooks/README.md`](../src/hooks/README.md) covers all installation modes, configuration files, and the uninstall flow.
 
 ### 3.2 Hook Interception (Command Rewriting)
 
-When an LLM agent runs a command (e.g., `git status`):
+For an integration that supports transparent rewriting, when an LLM agent runs a command (e.g., `git status`):
 
 1. The agent fires a `PreToolUse` event (or equivalent) containing the command as JSON
 2. The hook script reads the JSON, extracts the command string
@@ -91,6 +91,8 @@ When an LLM agent runs a command (e.g., `git status`):
 6. If anything fails (jq missing, rtk not found, no match), the hook exits silently -- the raw command runs unchanged
 
 All rewrite logic lives in Rust (`src/discover/registry.rs`). Hooks are thin delegates that handle agent-specific JSON formats.
+
+Codex is intentionally different: RTK does not return `allow + updatedInput`, because that response would also authorize the rewritten call. Its `PreToolUse` Hook emits no decision for Allow, Ask, or Default and only emits `deny` for an explicit deny decision. `RTK.md` is therefore the primary adoption mechanism for Codex.
 
 > **Details**: [`hooks/README.md`](../hooks/README.md) covers each agent's JSON format, the rewrite registry, compound command handling, and the `RTK_DISABLED` override.
 
