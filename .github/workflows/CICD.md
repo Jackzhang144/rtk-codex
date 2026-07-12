@@ -50,9 +50,10 @@ Trigger: push to develop | workflow_dispatch (not master) | Concurrency: cancel-
               │
      ┌────────▼──────────────────┐
      │ pre-release                │
-     │ compute next version      │
-     │ from conventional commits │
-     │ tag = v{next}-rc.{run}    │
+     │ base = Cargo.toml X.Y.Z   │
+     │ increment Codex B         │
+     │ tag = dev-X.Y.Z-codex.    │
+     │       A.B-rc.{run}        │
      └────────┬──────────────────┘
               │
      ┌────────▼──────────────────┐
@@ -62,7 +63,7 @@ Trigger: push to develop | workflow_dispatch (not master) | Concurrency: cancel-
               │
      ┌────────▼──────────────────┐
      │ Build                     │
-     │ 5 platforms + DEB + RPM   │
+     │ Apple Silicon tarball     │
      └────────┬──────────────────┘
               │
      ┌────────▼──────────────────┐
@@ -101,7 +102,7 @@ Trigger: push to master (only) | Concurrency: never cancelled
                                   │
                      ┌────────────▼────────────┐
                      │ Build                   │
-                     │ 5 platforms + DEB + RPM  │
+                     │ Apple Silicon tarball   │
                      └────────────┬────────────┘
                                   │
                      ┌────────────▼────────────┐
@@ -125,8 +126,8 @@ Trigger: workflow_dispatch
      └───────────┬────────────┘
                  │
      ┌───────────▼────────────┐
-     │ Full build pipeline     │
-     │ 5 platforms + DEB + RPM │
+     │ Fork build pipeline     │
+     │ Apple Silicon tarball   │
      └───────────┬────────────┘
                  │
           ┌──────┴──────┐
@@ -138,3 +139,5 @@ Trigger: workflow_dispatch
      Homebrew       badge only
      latest tag
 ```
+
+Fork release tags use `vX.Y.Z-codex.A.B`, where `X.Y.Z` is the upstream RTK version from `Cargo.toml` and `A.B` is the Codex adaptation version. The develop CD path creates `dev-X.Y.Z-codex.A.B-rc.{run}` prereleases by incrementing B from the latest matching Codex tag. Select A deliberately when you publish a new adaptation generation; this avoids upstream merges or PR titles changing the fork version. Publish a stable fork release manually with `release.yml`, for example `v0.42.4-codex.2.2`.

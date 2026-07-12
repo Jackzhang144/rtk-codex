@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to release (e.g., v0.1.0)'
+        description: 'Fork release tag (e.g., v0.42.4-codex.2.2)'
         required: true
       prerelease:
         description: 'Mark as pre-release'
